@@ -19,6 +19,7 @@ func Serve() {
 	r.HandleFunc("/", HomeHandler)
 	r.HandleFunc("/events", EventHandler)
 	r.HandleFunc("/searches/{search}", SearchHandler)
+	r.HandleFunc("/init", InitHandler)
 	headersOk := handlers.AllowedHeaders([]string{"X-Requested-With"})
 	originsOk := handlers.AllowedOrigins([]string{"*/*"})
 	methodsOk := handlers.AllowedMethods([]string{"GET", "HEAD", "POST", "PUT", "OPTIONS"})
@@ -44,6 +45,11 @@ func Serve() {
 
 func HomeHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "goRank!")
+}
+
+func InitHandler(w http.ResponseWriter, r *http.Request) {
+	InitStorage()
+	fmt.Fprint(w, "Maybe?")
 }
 
 func SearchHandler(w http.ResponseWriter, r *http.Request) {
@@ -85,7 +91,6 @@ func EventHandler(w http.ResponseWriter, r *http.Request) {
 			panic(err)
 		}
 	}
-
 
 	Save(event)
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
