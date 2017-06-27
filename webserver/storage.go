@@ -37,11 +37,11 @@ func InitStorage() {
 	defer session.Close()
 
 	if err := session.Query("CREATE KEYSPACE IF NOT EXISTS click WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}").Exec(); err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 
 	if err := session.Query("CREATE TABLE IF NOT EXISTS click.clicks ( search text, item text, timestamp timeuuid, PRIMARY KEY (search, item, timestamp) )").Exec(); err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 }
 
@@ -54,7 +54,7 @@ func getSession() *gocql.Session {
 	session, err := cluster.CreateSession()
 
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 	return session
 }

@@ -33,7 +33,7 @@ func Serve() {
 	fmt.Println("listening on:", address)
 
 	srv := &http.Server{
-		Handler: handlers.CORS(originsOk, headersOk, methodsOk)(r),
+		Handler: handlers.CORS(originsOk, headersOk, methodsOk)(handlers.RecoveryHandler()(r)),
 		Addr:    address,
 		// Good practice: enforce timeouts for servers you create!
 		WriteTimeout: 15 * time.Second,

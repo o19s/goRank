@@ -1,0 +1,64 @@
+<html>
+<head>
+<title>test post page</title>
+</head>
+<body>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/handlebars.js/4.0.10/handlebars.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mustache.js/2.3.0/mustache.js"></script>
+    <!-- Latest compiled and minified CSS -->
+    <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/css/bootstrap.min.css" integrity="sha384-BVYiiSIFeK1dGmJRAkycuHAHRg32OmUcww7on3RYdg4Va+PmSTsz/K68vbdEjh4u" crossorigin="anonymous">
+
+    <!-- Optional theme -->
+    <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/css/bootstrap-theme.min.css" integrity="sha384-rHyoN1iRsVXV4nD0JutlnGaslCJuC7uwjduW9SVrLvRYooPp2bWYgmgJQIXwl/Sp" crossorigin="anonymous">
+    <script src="javascript/gorank.js"></script>
+    <div class="container">
+        <div id="target">blah!</div>
+
+    </div>
+    <script id="template" type="x-tmpl-mustache">
+        <div class="row">
+            <div class="col-md-2"><img src="{{doc.poster_path}}" /></div>
+            <div class="col-md-10">
+                <h2>{{ doc.title }}</h2>
+                <p>{{doc.overview}}</p>
+                {{doc.score}}
+                <a href="#" onClick="GORANK.log_search('{{search}}','{{doc.id}}');getResults('{{search}}')">Rank!</a>
+            </div>
+        </div>
+    </script>
+    <script>
+        window.myJsonpCallback = function(data) {
+            // handle requested data from server
+            console.log(data.response.docs);
+            var template = document.getElementById('template').innerHTML;
+            Mustache.parse(template);   // optional, speeds up future uses
+            var rendered = "<h2>goRank your results for</h2><h1>" + search + "</h2>";
+            data.response.docs.forEach(function(document){
+                rendered = rendered + Mustache.render(template, {doc: document, search: search});
+            });
+            document.getElementById('target').innerHTML = rendered;
+        };
+
+        function getResults(search) {
+            window.search = search;
+            var sstats =GORANK.search_stats(search);
+            var bq = "&bq=";
+
+            for(var key in sstats) {
+                // boost by the # of clicks / 10
+                bq = bq + "id:" + key + "^" + (sstats[key]/10);
+            }
+            var query = 'http://solr.quepid.com/solr/tmdb/select?q=' + search +
+                '&wt=json&json.wrf=myJsonpCallback&defType=edismax&fl=*,%20score&qf=title,%20overview' + bq;
+            console.log(query);
+
+            var scriptEl = document.createElement('script');
+            scriptEl.setAttribute('src', query);
+            document.body.appendChild(scriptEl);
+        }
+
+        getResults("rocky");
+    </script>
+</body>
+
+</html>
