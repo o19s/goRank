@@ -1,4 +1,4 @@
-package goRank
+package webserver
 
 import (
 	"encoding/json"

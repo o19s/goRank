@@ -12,6 +12,8 @@ services:
     depends_on:
       - cassandra
   cassandra:
-    image: cassandra:3
+    image: cassandra-trireme:1
     ports:
       - "9042"
+    volumes:
+      - ./cassandra:/trireme
