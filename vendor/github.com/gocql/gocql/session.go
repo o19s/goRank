@@ -6,17 +6,17 @@ package gocql
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 	"unicode"
-
-	"golang.org/x/net/context"
 
 	"github.com/gocql/gocql/internal/lru"
 )
@@ -76,16 +76,23 @@ var queryPool = &sync.Pool{
 }
 
 func addrsToHosts(addrs []string, defaultPort int) ([]*HostInfo, error) {
-	hosts := make([]*HostInfo, len(addrs))
-	for i, hostport := range addrs {
+	var hosts []*HostInfo
+	for _, hostport := range addrs {
 		host, err := hostInfo(hostport, defaultPort)
 		if err != nil {
+			// Try other hosts if unable to resolve DNS name
+			if _, ok := err.(*net.DNSError); ok {
+				Logger.Printf("gocql: dns error: %v\n", err)
+				continue
+			}
 			return nil, err
 		}
 
-		hosts[i] = host
+		hosts = append(hosts, host)
 	}
-
+	if len(hosts) == 0 {
+		return nil, errors.New("failed to resolve any of the provided hostnames")
+	}
 	return hosts, nil
 }
 
@@ -111,8 +118,7 @@ func NewSession(cfg ClusterConfig) (*Session, error) {
 	s.routingKeyInfoCache.lru = lru.New(cfg.MaxRoutingKeyInfo)
 
 	s.hostSource = &ringDescriber{
-		session:   s,
-		closeChan: make(chan bool),
+		session: s,
 	}
 
 	if cfg.PoolConfig.HostSelectionPolicy == nil {
@@ -174,26 +180,19 @@ func (s *Session) init() error {
 			return err
 		}
 
-		// need to setup host source to check for broadcast_address in system.local
-		localHasRPCAddr, _ := checkSystemLocal(s.control)
-		s.hostSource.localHasRpcAddr = localHasRPCAddr
-
 		if !s.cfg.DisableInitialHostLookup {
-			// TODO(zariel): we need to get the partitioner from here
-			var p string
-			hosts, p, err = s.hostSource.GetHosts()
+			var partitioner string
+			hosts, partitioner, err = s.hostSource.GetHosts()
 			if err != nil {
 				return err
 			}
-			s.policy.SetPartitioner(p)
+			s.policy.SetPartitioner(partitioner)
 		}
 	}
 
 	for _, host := range hosts {
-		if s.cfg.HostFilter == nil || s.cfg.HostFilter.Accept(host) {
-			host = s.ring.addOrUpdate(host)
-			s.handleNodeUp(host.Peer(), host.Port(), false)
-		}
+		host = s.ring.addOrUpdate(host)
+		s.handleNodeUp(host.ConnectAddress(), host.Port(), false)
 	}
 
 	// TODO(zariel): we probably dont need this any more as we verify that we
@@ -234,7 +233,7 @@ func (s *Session) reconnectDownedHosts(intv time.Duration) {
 			if gocqlDebug {
 				buf := bytes.NewBufferString("Session.ring:")
 				for _, h := range hosts {
-					buf.WriteString("[" + h.Peer().String() + ":" + h.State().String() + "]")
+					buf.WriteString("[" + h.ConnectAddress().String() + ":" + h.State().String() + "]")
 				}
 				Logger.Println(buf.String())
 			}
@@ -243,7 +242,7 @@ func (s *Session) reconnectDownedHosts(intv time.Duration) {
 				if h.IsUp() {
 					continue
 				}
-				s.handleNodeUp(h.Peer(), h.Port(), true)
+				s.handleNodeUp(h.ConnectAddress(), h.Port(), true)
 			}
 		case <-s.quit:
 			return
@@ -344,10 +343,6 @@ func (s *Session) Close() {
 		s.pool.Close()
 	}
 
-	if s.hostSource != nil {
-		close(s.hostSource.closeChan)
-	}
-
 	if s.control != nil {
 		s.control.close()
 	}
@@ -387,6 +382,12 @@ func (s *Session) executeQuery(qry *Query) *Iter {
 	}
 
 	return iter
+}
+
+func (s *Session) removeHost(h *HostInfo) {
+	s.policy.RemoveHost(h)
+	s.pool.removeHost(h.ConnectAddress())
+	s.ring.removeHost(h.ConnectAddress())
 }
 
 // KeyspaceMetadata returns the schema metadata for the keyspace specified. Returns an error if the keyspace does not exist.
@@ -440,7 +441,7 @@ func (s *Session) routingKeyInfo(ctx context.Context, stmt string) (*routingKeyI
 	if cached {
 		// done accessing the cache
 		s.routingKeyInfoCache.mu.Unlock()
-		// the entry is an inflight struct similiar to that used by
+		// the entry is an inflight struct similar to that used by
 		// Conn to prepare statements
 		inflight := entry.(*inflightCachedEntry)
 
@@ -471,7 +472,7 @@ func (s *Session) routingKeyInfo(ctx context.Context, stmt string) (*routingKeyI
 	conn := s.getConn()
 	if conn == nil {
 		// TODO: better error?
-		inflight.err = errors.New("gocql: unable to fetch preapred info: no connection avilable")
+		inflight.err = errors.New("gocql: unable to fetch prepared info: no connection available")
 		return nil, inflight.err
 	}
 
@@ -1022,6 +1023,7 @@ func (q *Query) reset() {
 	q.defaultTimestamp = false
 	q.disableSkipMetadata = false
 	q.disableAutoPage = false
+	q.context = nil
 }
 
 // Iter represents an iterator that can be used to iterate over all rows that
@@ -1050,8 +1052,21 @@ func (iter *Iter) Columns() []ColumnInfo {
 }
 
 type Scanner interface {
+	// Next advances the row pointer to point at the next row, the row is valid until
+	// the next call of Next. It returns true if there is a row which is available to be
+	// scanned into with Scan.
+	// Next must be called before every call to Scan.
 	Next() bool
+	
+	// Scan copies the current row's columns into dest. If the length of dest does not equal
+	// the number of columns returned in the row an error is returned. If an error is encountered
+	// when unmarshalling a column into the value in dest an error is returned and the row is invalidated
+	// until the next call to Next.
+	// Next must be called before calling Scan, if it is not an error is returned.
 	Scan(...interface{}) error
+	
+	// Err returns the if there was one during iteration that resulted in iteration being unable to complete.
+	// Err will also release resources held by the iterator, the Scanner should not used after being called.
 	Err() error
 }
 
@@ -1060,10 +1075,6 @@ type iterScanner struct {
 	cols [][]byte
 }
 
-// Next advances the row pointer to point at the next row, the row is valid until
-// the next call of Next. It returns true if there is a row which is available to be
-// scanned into with Scan.
-// Next must be called before every call to Scan.
 func (is *iterScanner) Next() bool {
 	iter := is.iter
 	if iter.err != nil {
@@ -1117,11 +1128,6 @@ func scanColumn(p []byte, col ColumnInfo, dest []interface{}) (int, error) {
 	}
 }
 
-// Scan copies the current row's columns into dest. If the length of dest does not equal
-// the number of columns returned in the row an error is returned. If an error is encountered
-// when unmarshalling a column into the value in dest an error is returned and the row is invalidated
-// until the next call to Next.
-// Next must be called before calling Scan, if it is not an error is returned.
 func (is *iterScanner) Scan(dest ...interface{}) error {
 	if is.cols == nil {
 		return errors.New("gocql: Scan called without calling Next")
@@ -1152,8 +1158,6 @@ func (is *iterScanner) Scan(dest ...interface{}) error {
 	return err
 }
 
-// Err returns the if there was one during iteration that resulted in iteration being unable to complete.
-// Err will also release resources held by the iterator and should not used after being called.
 func (is *iterScanner) Err() error {
 	iter := is.iter
 	is.iter = nil

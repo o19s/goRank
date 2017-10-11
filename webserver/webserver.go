@@ -12,14 +12,23 @@ import (
 
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
+
+	"goRank/storage"
+	"goRank/models"
+
 )
 
-func Serve() {
+type WebServer struct {
+	storage storage.Engine
+}
+
+func (ws *WebServer) Serve(engine storage.Engine) {
+	ws.storage = engine
 	r := mux.NewRouter()
-	r.HandleFunc("/", HomeHandler)
-	r.HandleFunc("/events", EventHandler)
-	r.HandleFunc("/searches/{search}", SearchHandler)
-	r.HandleFunc("/init", InitHandler)
+	r.HandleFunc("/", ws.HomeHandler)
+	r.HandleFunc("/events", ws.EventHandler)
+	r.HandleFunc("/searches/{search}", ws.SearchHandler)
+	r.HandleFunc("/init", ws.InitHandler)
 	headersOk := handlers.AllowedHeaders([]string{"X-Requested-With"})
 	originsOk := handlers.AllowedOrigins([]string{"*/*"})
 	methodsOk := handlers.AllowedMethods([]string{"GET", "HEAD", "POST", "PUT", "OPTIONS"})
@@ -43,20 +52,20 @@ func Serve() {
 	log.Fatal(srv.ListenAndServe())
 }
 
-func HomeHandler(w http.ResponseWriter, r *http.Request) {
+func (ws *WebServer) HomeHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "goRank!")
 }
 
-func InitHandler(w http.ResponseWriter, r *http.Request) {
-	InitStorage()
+func (ws *WebServer) InitHandler(w http.ResponseWriter, r *http.Request) {
+	ws.storage.InitStorage()
 	fmt.Fprint(w, "Maybe?")
 }
 
-func SearchHandler(w http.ResponseWriter, r *http.Request) {
+func (ws *WebServer) SearchHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	summary := make(map[string]int)
 
-	events, err := FindEventsForSearch(vars["search"])
+	events, err := ws.storage.FindEventsForSearch(vars["search"])
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 		w.WriteHeader(422) // unprocessable entity
@@ -72,8 +81,8 @@ func SearchHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, string(js))
 }
 
-func EventHandler(w http.ResponseWriter, r *http.Request) {
-	var event Event
+func (ws *WebServer) EventHandler(w http.ResponseWriter, r *http.Request) {
+	var event models.Event
 	// ignore hugh writes, DDOS bad!
 	body, err := ioutil.ReadAll(io.LimitReader(r.Body, 1048576))
 	if err != nil {
@@ -92,7 +101,7 @@ func EventHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	Save(event)
+	ws.storage.Save(event)
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 	w.WriteHeader(http.StatusCreated)
 }

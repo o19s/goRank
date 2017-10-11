@@ -6,6 +6,7 @@ package gocql
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -18,8 +19,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/net/context"
-
 	"github.com/gocql/gocql/internal/lru"
 
 	"github.com/gocql/gocql/internal/streams"
@@ -29,6 +28,7 @@ var (
 	approvedAuthenticators = [...]string{
 		"org.apache.cassandra.auth.PasswordAuthenticator",
 		"com.instaclustr.cassandra.auth.SharedSecretAuthenticator",
+		"com.datastax.bdp.cassandra.auth.DseAuthenticator",
 	}
 )
 
@@ -78,7 +78,7 @@ func (p PasswordAuthenticator) Success(data []byte) error {
 }
 
 type SslOptions struct {
-	tls.Config
+	*tls.Config
 
 	// CertPath and KeyPath are optional depending on server
 	// config, but both fields must be omitted to avoid using a
@@ -156,10 +156,10 @@ func Connect(host *HostInfo, cfg *ConnConfig, errorHandler ConnErrorHandler, ses
 	// TODO(zariel): remove these
 	if host == nil {
 		panic("host is nil")
-	} else if len(host.Peer()) == 0 {
-		panic("host missing peer ip address")
+	} else if len(host.ConnectAddress()) == 0 {
+		panic(fmt.Sprintf("host missing connect ip address: %v", host))
 	} else if host.Port() == 0 {
-		panic("host missing port")
+		panic(fmt.Sprintf("host missing port: %v", host))
 	}
 
 	var (
@@ -172,7 +172,7 @@ func Connect(host *HostInfo, cfg *ConnConfig, errorHandler ConnErrorHandler, ses
 	}
 
 	// TODO(zariel): handle ipv6 zone
-	translatedPeer, translatedPort := session.cfg.translateAddressPort(host.Peer(), host.Port())
+	translatedPeer, translatedPort := session.cfg.translateAddressPort(host.ConnectAddress(), host.Port())
 	addr := (&net.TCPAddr{IP: translatedPeer, Port: translatedPort}).String()
 	//addr := (&net.TCPAddr{IP: host.Peer(), Port: host.Port()}).String()
 
@@ -590,11 +590,11 @@ func (c *Conn) exec(ctx context.Context, req frameWriter, tracer Tracer) (*frame
 		call = streamPool.Get().(*callReq)
 	}
 	c.calls[stream] = call
-	c.mu.Unlock()
 
 	call.framer = framer
 	call.timeout = make(chan struct{})
 	call.streamID = stream
+	c.mu.Unlock()
 
 	if tracer != nil {
 		framer.trace()
@@ -712,6 +712,7 @@ func (c *Conn) prepareStatement(ctx context.Context, stmt string, tracer Tracer)
 	if err != nil {
 		flight.err = err
 		flight.wg.Done()
+		c.session.stmtsLRU.remove(stmtCacheKey)
 		return nil, err
 	}
 
@@ -724,14 +725,14 @@ func (c *Conn) prepareStatement(ctx context.Context, stmt string, tracer Tracer)
 
 	// TODO(zariel): tidy this up, simplify handling of frame parsing so its not duplicated
 	// everytime we need to parse a frame.
-	if len(framer.traceID) > 0 {
+	if len(framer.traceID) > 0 && tracer != nil {
 		tracer.Trace(framer.traceID)
 	}
 
 	switch x := frame.(type) {
 	case *resultPreparedFrame:
 		flight.preparedStatment = &preparedStatment{
-			// defensivly copy as we will recycle the underlying buffer after we
+			// defensively copy as we will recycle the underlying buffer after we
 			// return.
 			id: copyBytes(x.preparedID),
 			// the type info's should _not_ have a reference to the framers read buffer,
@@ -753,6 +754,26 @@ func (c *Conn) prepareStatement(ctx context.Context, stmt string, tracer Tracer)
 	framerPool.Put(framer)
 
 	return flight.preparedStatment, flight.err
+}
+
+func marshalQueryValue(typ TypeInfo, value interface{}, dst *queryValues) error {
+	if named, ok := value.(*namedValue); ok {
+		dst.name = named.name
+		value = named.value
+	}
+
+	if _, ok := value.(unsetColumn); !ok {
+		val, err := Marshal(typ, value)
+		if err != nil {
+			return err
+		}
+
+		dst.value = val
+	} else {
+		dst.isUnset = true
+	}
+
+	return nil
 }
 
 func (c *Conn) executeQuery(qry *Query) *Iter {
@@ -808,14 +829,12 @@ func (c *Conn) executeQuery(qry *Query) *Iter {
 
 		params.values = make([]queryValues, len(values))
 		for i := 0; i < len(values); i++ {
-			val, err := Marshal(info.request.columns[i].TypeInfo, values[i])
-			if err != nil {
+			v := &params.values[i]
+			value := values[i]
+			typ := info.request.columns[i].TypeInfo
+			if err := marshalQueryValue(typ, value, v); err != nil {
 				return &Iter{err: err}
 			}
-
-			v := &params.values[i]
-			v.value = val
-			// TODO: handle query binding names
 		}
 
 		params.skipMeta = !(c.session.cfg.DisableSkipMetadata || qry.disableSkipMetadata)
@@ -841,7 +860,7 @@ func (c *Conn) executeQuery(qry *Query) *Iter {
 		return &Iter{err: err}
 	}
 
-	if len(framer.traceID) > 0 {
+	if len(framer.traceID) > 0 && qry.trace != nil {
 		qry.trace.Trace(framer.traceID)
 	}
 
@@ -961,11 +980,12 @@ func (c *Conn) executeBatch(batch *Batch) *Iter {
 
 	n := len(batch.Entries)
 	req := &writeBatchFrame{
-		typ:               batch.Type,
-		statements:        make([]batchStatment, n),
-		consistency:       batch.Cons,
-		serialConsistency: batch.serialCons,
-		defaultTimestamp:  batch.defaultTimestamp,
+		typ:                   batch.Type,
+		statements:            make([]batchStatment, n),
+		consistency:           batch.Cons,
+		serialConsistency:     batch.serialCons,
+		defaultTimestamp:      batch.defaultTimestamp,
+		defaultTimestampValue: batch.defaultTimestampValue,
 	}
 
 	stmts := make(map[string]string, len(batch.Entries))
@@ -1004,13 +1024,12 @@ func (c *Conn) executeBatch(batch *Batch) *Iter {
 			b.values = make([]queryValues, info.request.actualColCount)
 
 			for j := 0; j < info.request.actualColCount; j++ {
-				val, err := Marshal(info.request.columns[j].TypeInfo, values[j])
-				if err != nil {
+				v := &b.values[j]
+				value := values[j]
+				typ := info.request.columns[j].TypeInfo
+				if err := marshalQueryValue(typ, value, v); err != nil {
 					return &Iter{err: err}
 				}
-
-				b.values[j].value = val
-				// TODO: add names
 			}
 		} else {
 			b.statement = entry.Stmt
@@ -1044,7 +1063,7 @@ func (c *Conn) executeBatch(batch *Batch) *Iter {
 		if found {
 			return c.executeBatch(batch)
 		} else {
-			return &Iter{err: err, framer: framer}
+			return &Iter{err: x, framer: framer}
 		}
 	case *resultRowsFrame:
 		iter := &Iter{

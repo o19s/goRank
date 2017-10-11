@@ -28,7 +28,7 @@ func (p PoolConfig) buildPool(session *Session) *policyConnPool {
 // behavior to fit the most common use cases. Applications that require a
 // different setup must implement their own cluster.
 type ClusterConfig struct {
-	// addresses for the initial connections. It is recomended to use the value set in
+	// addresses for the initial connections. It is recommended to use the value set in
 	// the Cassandra config for broadcast_address or listen_address, an IP address not
 	// a domain name. This is because events from Cassandra will use the configured IP
 	// address, which is used to index connected hosts. If the domain name specified
@@ -65,7 +65,7 @@ type ClusterConfig struct {
 	// configuration of host selection and connection selection policies.
 	PoolConfig PoolConfig
 
-	// If not zero, gocql attempt to reconnect known DOWN nodes in every ReconnectSleep.
+	// If not zero, gocql attempt to reconnect known DOWN nodes in every ReconnectInterval.
 	ReconnectInterval time.Duration
 
 	// The maximum amount of time to wait for schema agreement in a cluster after
@@ -122,7 +122,7 @@ type ClusterConfig struct {
 // NewCluster generates a new config for the default cluster implementation.
 //
 // The supplied hosts are used to initially connect to the cluster then the rest of
-// the ring will be automatically discovered. It is recomended to use the value set in
+// the ring will be automatically discovered. It is recommended to use the value set in
 // the Cassandra config for broadcast_address or listen_address, an IP address not
 // a domain name. This is because events from Cassandra will use the configured IP
 // address, which is used to index connected hosts. If the domain name specified
