@@ -29,8 +29,8 @@ func (ws *WebServer) Serve(engine storage.Engine) {
 	r.HandleFunc("/events", ws.EventHandler)
 	r.HandleFunc("/searches/{search}", ws.SearchHandler)
 	r.HandleFunc("/init", ws.InitHandler)
-	headersOk := handlers.AllowedHeaders([]string{"X-Requested-With"})
-	originsOk := handlers.AllowedOrigins([]string{"*/*"})
+	headersOk := handlers.AllowedHeaders([]string{"X-Requested-With", "Content-Type"})
+	originsOk := handlers.AllowedOrigins([]string{"*"})
 	methodsOk := handlers.AllowedMethods([]string{"GET", "HEAD", "POST", "PUT", "OPTIONS"})
 
 	port := os.Getenv("GORANK_PORT")
@@ -42,7 +42,7 @@ func (ws *WebServer) Serve(engine storage.Engine) {
 	fmt.Println("listening on:", address)
 
 	srv := &http.Server{
-		Handler: handlers.CORS(originsOk, headersOk, methodsOk)(handlers.RecoveryHandler()(r)),
+		Handler: handlers.CombinedLoggingHandler(os.Stdout, handlers.RecoveryHandler()(handlers.CORS(headersOk,originsOk,methodsOk)(r))),
 		Addr:    address,
 		// Good practice: enforce timeouts for servers you create!
 		WriteTimeout: 15 * time.Second,
@@ -70,6 +70,7 @@ func (ws *WebServer) SearchHandler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 		w.WriteHeader(422) // unprocessable entity
 		if err := json.NewEncoder(w).Encode(err); err != nil {
+			log.Fatal(err)
 			panic(err)
 		}
 	}
@@ -94,14 +95,14 @@ func (ws *WebServer) EventHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.Unmarshal(body, &event); err != nil {
-		w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+		//w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 		w.WriteHeader(422) // unprocessable entity
 		if err := json.NewEncoder(w).Encode(err); err != nil {
 			panic(err)
 		}
+	} else {
+		ws.storage.Save(event)
+		w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+		w.WriteHeader(http.StatusCreated)
 	}
-
-	ws.storage.Save(event)
-	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	w.WriteHeader(http.StatusCreated)
 }

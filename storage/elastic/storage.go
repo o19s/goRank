@@ -1,11 +1,12 @@
 package elastic
 
 import (
-	es "gopkg.in/olivere/elastic.v5"
 	"context"
 	"fmt"
 	"goRank/models"
 	"reflect"
+
+	es "gopkg.in/olivere/elastic.v5"
 )
 
 const mapping = `
@@ -58,7 +59,7 @@ func (e Elastic) Version() {
 	fmt.Printf("Elasticsearch returned with code %d and version %s\n", code, info.Version.Number)
 }
 
-func (e Elastic)FindEventsForSearch(search string) (events []models.Event, err error) {
+func (e Elastic) FindEventsForSearch(search string) (events []models.Event, err error) {
 	termQuery := es.NewTermQuery("search", search)
 	es.NewMatchAllQuery()
 	searchResult, err := e.client.Search().
@@ -80,7 +81,7 @@ func (e Elastic)FindEventsForSearch(search string) (events []models.Event, err e
 	return
 }
 
-func (e Elastic)InitStorage() {
+func (e Elastic) InitStorage() {
 	exists, err := e.client.IndexExists("gorank").Do(context.Background())
 	if err != nil {
 		// Handle error
@@ -100,15 +101,13 @@ func (e Elastic)InitStorage() {
 }
 
 func (e Elastic) Save(event models.Event) {
-	put, err :=  e.client.Index().
-			Index("gorank").
-			Type("event").
-			BodyJson(event).
-			Do(context.Background())
+	_, err := e.client.Index().
+		Index("gorank").
+		Type("event").
+		BodyJson(event).
+		Do(context.Background())
 	if err != nil {
 		// Handle error
 		panic(err)
 	}
-	fmt.Printf("Indexed event %s to index %s, type %s\n", put.Id, put.Index, put.Type)
-
 }
